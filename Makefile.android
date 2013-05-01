@@ -1,0 +1,8 @@
+obj-m += pinfodump.o
+pinfodump-objs := file.o main.o
+
+all:
+	make ARCH=arm CROSS_COMPILE=/opt/android-ndk/toolchains/arm-linux-androideabi-4.4.3/prebuilt/linux-x86/bin/arm-linux-androideabi- EXTRA_CFLAGS=-fno-pic -C $(KDIR) M=$(PWD) modules
+	mv pinfodump.ko pinfodump-android.ko
+clean:
+	make -C $(KDIR) M=$(PWD) clean

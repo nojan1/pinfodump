@@ -46,28 +46,6 @@ int dumpmem = 1;
 module_param(path, charp, S_IRUGO);
 module_param(dumpmem, int, S_IRUGO);
 
-char *exe_from_mm(struct mm_struct *mm, char *buf, int len) {
-  struct vm_area_struct *vma;
-  char *p = NULL;
-
-  down_read(&mm->mmap_sem);
-
-  vma = mm->mmap;
-
-  while (vma) {
-    if ((vma->vm_flags & VM_EXEC) && vma->vm_file)
-      break;
-    vma = vma->vm_next;
-  }
-
-  if (vma && vma->vm_file)
-    p = tpe_d_path(vma->vm_file, buf, len);
-
-up_read(&mm->mmap_sem);
-
-return p;
-}
-
 void getStateDesc(long state, char *buffer){
   switch(state){
   case 0:
@@ -102,112 +80,126 @@ void getStateDesc(long state, char *buffer){
   }
 }
 
-static void write_null_mem(struct file* file, unsigned long* offset){
+static void write_null_mem(struct file* file){
   int i;
-  unsigned long bla = 0;
+  u64 bla = 0;
   unsigned char sep = '\xFF';
 
-  for(i = 0;i<3;i++){
-    //Write length of segment
-    file_write(file, *offset, ((unsigned char*)&bla), sizeof(bla));
-    file_write(file, *offset, &sep, 1);
-    DBG("%lu %lu", bla, sizeof(bla));
-  }
+  file_write(file, NULL, &bla, sizeof(bla));
+  file_write(file, NULL, &sep, 1);
 }
 
-static int write_mem(unsigned long start, unsigned long stop,  struct file* file, unsigned long* offset){
-  #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
-        resource_size_t i, is;
- #else
-        __PTRDIFF_TYPE__ i, is;
- #endif
+static int write_mem(struct mm_struct * mem,  struct file* file){
+  struct vm_area_struct * vma;
+  struct page * p;
+  void * v;
+  unsigned long i, is, end_a, start_a, s = 0;
+  char name[50];
+  u64 flags;
+  u64 length;
+  u64 address;
+  unsigned char sep = '\xFF';
 
-	struct page * p;
-	void * v;
-	unsigned long s = 0;
-	unsigned char sep = '\xFF';
-	unsigned long totlength = stop - start;
-	
-	//Write length of segment
-        file_write(file, *offset, ((unsigned char*)&totlength), sizeof(totlength));
-	file_write(file, *offset, &sep, 1);
+  down_read(&mem->mmap_sem);
 
-	DBG("%lu %lu", totlength, sizeof(totlength));
+  for(vma = mem->mmap; vma != NULL; vma = vma->vm_next){
+    memset(name, '\0', 50);
 
-	for (i = start; i <= stop; i+= PAGE_SIZE){
-	  p = pfn_to_page((i) >> PAGE_SHIFT);
-	  is = min((size_t) PAGE_SIZE, (size_t) (stop - i + 1));
+    if(vma->vm_file)
+      tpe_d_path(vma->vm_file, name, 50);
 
-	  if(s + is > totlength){
-	    is -= (totlength - s);
-	  }
+    flags = (u64)vma->vm_flags;
 
-	  v = kmap(p);
-	  s += file_write(file, *offset, (unsigned char*)v, is);
-	  kunmap(p);
-	}
+    end_a = PAGE_ALIGN(vma->vm_end);
+    start_a = vma->vm_start & PAGE_MASK;
+    length = end_a - start_a;
+    address = (u64)start_a;
 
-	if(s != totlength){
-	  DBG("Warning: Wrote %lu out of %lu!", s, totlength);
-	}
+    //Write header
+    file_write(file, NULL, &length, sizeof(length));
+    file_write(file, NULL, &sep, 1);
+    file_write(file, NULL, &address, sizeof(address));
+    file_write(file, NULL, &sep, 1);
+    file_write(file, NULL, &flags, sizeof(flags));
+    file_write(file, NULL, &sep, 1);
+    file_write(file, NULL, name, 50);
+    file_write(file, NULL, &sep, 1);
 
-	return 0;
+    s = 0;
+
+    for(i = start_a; i < end_a; i += PAGE_SIZE){
+      p = pfn_to_page((i) >> PAGE_SHIFT);
+      is = min((size_t) PAGE_SIZE, (size_t) (end_a - i + 1));
+
+      if(s + is > length){
+      	is -= (length - s);
+      }
+     
+      v = kmap(p);
+      file_write(file, NULL, v, is);
+      //DBG("%lu", is);
+      s+= is;
+      kunmap(p);
+    }
+
+    if(s != length){
+      DBG("Warning: Wrote %lu out of %lu!", s, length);
+    }
+    DBG("%lu", length);
+  }
+
+  up_read(&mem->mmap_sem);
+
+  return 0;
 }
 
 static int __init init_pinfodump(void)
 {
   char data[255], stateBuffer[255], command[255];
-	struct task_struct *task;
-	struct file * outfile;
-	unsigned long file_offset = 0;
+  struct task_struct *task;
+  struct file * outfile;
 
-	if(!path) {
-	  //No path specified
-	  DBG("No path specified");
-	  return -EINVAL;
-	}
+  if(!path) {
+    //No path specified
+    DBG("No path specified");
+    return -EINVAL;
+  }
 
-	DBG("Process info dumping now starts\n");
+  DBG("Process info dumping now starts\n");
+  outfile = file_open(path, O_WRONLY | O_CREAT, 0444);
 
-	outfile = file_open(path, O_WRONLY | O_CREAT, 0444);
+  rcu_read_lock();                                                    
+  for_each_process(task) {                                             
+    task_lock(task);                                             
 
-	rcu_read_lock();                                                    
-	for_each_process(task) {                                             
-	  task_lock(task);                                             
+    //DBG("%d %d", task->pid, task->parent->pid);
 
-	  //DBG("%d %d", task->pid, task->parent->pid);
+    getStateDesc(task->state, stateBuffer);
+    strcpy(command, task->comm);
 
-	  getStateDesc(task->state, stateBuffer);
+    sprintf(data, "%i %s %i %i %s\xFF", task->pid, command, get_task_uid(task), get_task_parent(task)->pid, stateBuffer);
+    file_write(outfile, NULL, data, strlen(data));
 
-	  //if(task->mm){
-	  //exe_from_mm(task->mm, command, 255);
-	  //}else{
-	    strcpy(command, task->comm);
-	    //}
+    if(task->mm && dumpmem){
+      DBG("Dumping memory");
+      write_mem(task->mm, outfile);;
+    }else{
+      write_null_mem(outfile);
+    }
 
-	  sprintf(data, "%i %s %i %i %s\xFF", task->pid, command, get_task_uid(task), get_task_parent(task)->pid, stateBuffer);
-	  file_write(outfile, file_offset, data, strlen(data));
-	  file_offset += strlen(data);
+    //write footer
+    file_write(outfile, NULL, "nojan", 5);
 
-	  if(task->mm && dumpmem){
-	    DBG("Dumping memory");
-	    write_mem(task->mm->start_code, task->mm->end_code, outfile, &file_offset);
-	    write_mem(task->mm->start_data, task->mm->end_data, outfile, &file_offset);
-	    write_mem(task->mm->start_brk, task->mm->brk, outfile, &file_offset);
-	  }else{
-	    write_null_mem(outfile, &file_offset);
-	  }
+    task_unlock(task);     
+  }                                                                    
+  rcu_read_unlock();           
 
-	  task_unlock(task);                                           
-	}                                                                    
-	rcu_read_unlock();           
+  file_sync(outfile);
+  file_close(outfile);
 
-	file_sync(outfile);
-	file_close(outfile);
+  DBG("Dump completed!");
 
-	DBG("Dump completed!");
-
-	return 0;
+  return 0;
 }
 
 static void __exit close_pinfodump(void)

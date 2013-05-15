@@ -11,6 +11,7 @@
 #include <linux/mm_types.h>
 #include <linux/pfn.h>
 #include <linux/highmem.h>
+#include <linux/slab.h>
 
 #include "file.h"
 
@@ -81,7 +82,6 @@ void getStateDesc(long state, char *buffer){
 }
 
 static void write_null_mem(struct file* file){
-  int i;
   u64 bla = 0;
   unsigned char sep = '\xFF';
 
@@ -92,9 +92,10 @@ static void write_null_mem(struct file* file){
 static int write_mem(struct mm_struct * mem,  struct file* file){
   struct vm_area_struct * vma;
   struct page * p;
+  struct file * memdumpfile;
   void * v;
   unsigned long i, is, end_a, start_a, s = 0;
-  char name[50];
+  char name[50], memdumppath[255];
   u64 flags;
   u64 length;
   u64 address;
@@ -127,6 +128,20 @@ static int write_mem(struct mm_struct * mem,  struct file* file){
 
     s = 0;
 
+    strcpy(memdumppath, path);
+    if(vma->vm_file)
+      strcat(memdumppath, name);
+    
+    sprintf(name, "%lu", address);
+    strcat(memdumppath, name);
+    strcat(memdumppath, ".dump");
+    memdumpfile = file_open(memdumppath, O_WRONLY | O_CREAT, 0444);
+
+    if(memdumpfile == NULL){
+      DBG("ERROR OPENING FILE; %s", memdumppath);
+      break;
+    }
+
     for(i = start_a; i < end_a; i += PAGE_SIZE){
       p = pfn_to_page((i) >> PAGE_SHIFT);
       is = min((size_t) PAGE_SIZE, (size_t) (end_a - i + 1));
@@ -136,7 +151,7 @@ static int write_mem(struct mm_struct * mem,  struct file* file){
       }
      
       v = kmap(p);
-      file_write(file, NULL, v, is);
+      file_write(memdumpfile, NULL, v, is);
       //DBG("%lu", is);
       s+= is;
       kunmap(p);
@@ -146,6 +161,9 @@ static int write_mem(struct mm_struct * mem,  struct file* file){
       DBG("Warning: Wrote %lu out of %lu!", s, length);
     }
     DBG("%lu", length);
+
+    file_sync(memdumpfile);
+    file_close(memdumpfile);
   }
 
   up_read(&mem->mmap_sem);
@@ -155,18 +173,31 @@ static int write_mem(struct mm_struct * mem,  struct file* file){
 
 static int __init init_pinfodump(void)
 {
-  char data[255], stateBuffer[255], command[255];
+  char * data, * stateBuffer, * command, * pathBuffer;
   struct task_struct *task;
   struct file * outfile;
 
-  if(!path) {
+  data = kmalloc(255, GFP_KERNEL);
+  stateBuffer = kmalloc(255, GFP_KERNEL);
+  command = kmalloc(255, GFP_KERNEL);
+  pathBuffer = kmalloc(255, GFP_KERNEL);
+
+  if(!data || !stateBuffer || !command || !pathBuffer){
+    DBG("ERROR, allocation");
+    return -ENOMEM;
+  }
+
+  if(!path || path[strlen(path)-1] != '/') {
     //No path specified
-    DBG("No path specified");
+    DBG("No valid path specified (note: ending / )");
     return -EINVAL;
   }
 
+  strcpy(pathBuffer, path);
+  strcat(pathBuffer, "dump.info");
+  
   DBG("Process info dumping now starts\n");
-  outfile = file_open(path, O_WRONLY | O_CREAT, 0444);
+  outfile = file_open(pathBuffer, O_WRONLY | O_CREAT, 0444);
 
   rcu_read_lock();                                                    
   for_each_process(task) {                                             
@@ -196,6 +227,12 @@ static int __init init_pinfodump(void)
 
   file_sync(outfile);
   file_close(outfile);
+
+  
+  kfree(data);
+  kfree(stateBuffer);
+  kfree(command);
+  kfree(pathBuffer);
 
   DBG("Dump completed!");
 

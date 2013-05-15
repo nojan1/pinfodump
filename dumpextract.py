@@ -2,6 +2,7 @@
 
 import sys, os
 from struct import *
+from outputfile import *
 
 def read(f, l):
     tmp = f.read(l)
@@ -40,15 +41,12 @@ def sync(f, msg = None):
          sys.exit(1)
 
 if len(sys.argv) < 3:
-    print("Usage: dumpextract.py <DUMP FILE> <OUTPUT FOLDER>")
+    print("Usage: dumpextract.py <DUMP PATH> <OUTPUT FILE>")
     sys.exit(1)
 
-if not os.path.exists(sys.argv[2]):
-    os.mkdir(sys.argv[2])
-
-dump = open(sys.argv[1], "rb")
-pinfo = open(os.path.join(sys.argv[2], "pinfo.txt"), "w")
-pinfo.write("PID\tCOMMAND\tUID\tPARENT\tSTATE\n")
+dump = open(os.path.join(sys.argv[1], "dump.info"), "rb")
+output = OutputFile(sys.argv[2])
+output.beginFile()
 
 data = b""
 while 1:
@@ -60,8 +58,8 @@ while 1:
           #      data = data[0:i] + b"\x3F" + data[i+1:]
 
         print(data)
-        row = data.decode("ascii")
-        pinfo.write(row.replace(" ","\t") + "\n")
+        row = data.decode("ascii").replace("\t", " ")
+        output.beginProcess(row.split(" "))
 
         pid = row.split(" ")[0].strip().replace(u"\x00","")
         
@@ -89,24 +87,23 @@ while 1:
                 data = read(dump, intsize)
                 flags = unpack(format, data)[0]
                 sync(dump, "After flags")
-2
+
                 data = read(dump, 50)
                 name = unpack("<50s", data)[0]
                 name = name.decode("ascii")
 
                 sync(dump, "After name")
 
-                print(name, hex(address), length, decodeflags(flags))
+                output.addVMA(name, address, length, decodeflags(flags), sys.argv[1])
 
-                out = open(os.path.join(sys.argv[2], str(address)+".dump"), "wb")
-                out.write(read(dump,length))
-                out.close()
-
-            print(hex(dump.tell()))
+            #print(hex(dump.tell()))
             data = read(dump, 5)
             
             if data[0:] == b"\x6e\x6f\x6a\x61\x6e":
                 data = b""
+                output.endProcess()
                 break
             else:
                 dump.seek(-5, 1)
+
+output.endFile()
